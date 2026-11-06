@@ -1,0 +1,45 @@
+name: Build Calcula IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20
+
+    - name: Instalar dependencias
+      run: npm ci
+
+    - name: Sincronizar Capacitor iOS
+      run: npx cap sync ios
+
+    - name: Compilar App
+      run: |
+        xcodebuild -workspace ios/App/App.xcworkspace -scheme App -configuration Release -sdk iphoneos CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO -derivedDataPath ios/App/Build/
+        APP_PATH="ios/App/Build/Build/Products/Release-iphoneos/App.app"
+        if [ ! -d "$APP_PATH" ]; then
+          echo "No se generó $APP_PATH"
+          ls -R ios/App/Build/Build/Products/Release-iphoneos || true
+          exit 1
+        fi
+        rm -rf Payload
+        mkdir -p Payload
+        mv "$APP_PATH" Payload/
+        zip -r Calcula.ipa Payload
+
+    - name: Subir IPA a Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: Calcula-IPA
+        path: Calcula.ipa
