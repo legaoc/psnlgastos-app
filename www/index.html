@@ -4803,7 +4803,10 @@ import {
   Timestamp,
   setDoc,
   getDoc,
-  limit
+  limit,
+  onSnapshotsInSync,
+  disableNetwork,
+  enableNetwork
 }
 from "https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js";
 
@@ -4846,6 +4849,90 @@ catch{
 
   db = getFirestore(firebaseApp);
 
+}
+
+/* =========================================================
+   SINCRONIZACIÓN (local + nube)
+   Los datos ya se guardan en el caché local de Firestore
+   (persistentLocalCache en IndexedDB) y se sincronizan con
+   la nube mediante onSnapshot. Esto solo hace visible el
+   estado y permite pausar la sincronización con la nube;
+   con la nube apagada los datos se siguen guardando en
+   este dispositivo.
+========================================================= */
+
+const CLOUD_SYNC_KEY = "calcula-cloud-sync";
+let cloudSyncEnabled = localStorage.getItem(CLOUD_SYNC_KEY) !== "0";
+let syncInSync = false;
+let syncNowWaiting = false;
+let syncListenerStarted = false;
+
+function syncStatusLabel(){
+  if(!cloudSyncEnabled || !navigator.onLine){
+    return "Sin conexión: guardado en este dispositivo";
+  }
+  return syncInSync
+    ? "Sincronizado con la nube"
+    : "Sincronizando…";
+}
+
+function updateSyncStatusUI(){
+  const text = document.getElementById("syncStatusText");
+  if(text) text.textContent = syncStatusLabel();
+  const head = document.getElementById("syncStatusHead");
+  if(head) head.textContent = syncStatusLabel();
+}
+
+function startSyncStatusListener(){
+  if(syncListenerStarted) return;
+  syncListenerStarted = true;
+  onSnapshotsInSync(db, ()=>{
+    syncInSync = true;
+    if(syncNowWaiting){
+      syncNowWaiting = false;
+      showToast("Sincronizado con la nube");
+    }
+    updateSyncStatusUI();
+  });
+  window.addEventListener("online", updateSyncStatusUI);
+  window.addEventListener("offline", updateSyncStatusUI);
+}
+
+async function applyCloudSyncPreference(){
+  startSyncStatusListener();
+  try{
+    if(cloudSyncEnabled) await enableNetwork(db);
+    else await disableNetwork(db);
+  }catch(error){
+    console.error(error);
+  }
+  updateSyncStatusUI();
+}
+
+async function setCloudSyncEnabled(enabled){
+  cloudSyncEnabled = enabled;
+  localStorage.setItem(CLOUD_SYNC_KEY, enabled ? "1" : "0");
+  syncInSync = false;
+  updateSyncStatusUI();
+  try{
+    if(enabled) await enableNetwork(db);
+    else await disableNetwork(db);
+  }catch(error){
+    console.error(error);
+  }
+  updateSyncStatusUI();
+}
+
+async function syncNow(){
+  if(!cloudSyncEnabled){
+    await setCloudSyncEnabled(true);
+  }
+  if(syncInSync && navigator.onLine){
+    showToast("Sincronizado con la nube");
+    return;
+  }
+  syncNowWaiting = true;
+  updateSyncStatusUI();
 }
 
 const auth = getAuth(firebaseApp);
@@ -6630,7 +6717,10 @@ function paintAfterSplash(){
 
 function isStandaloneApp(){
   return window.matchMedia("(display-mode: standalone)").matches
-    || window.navigator.standalone===true;
+    || window.navigator.standalone===true
+    || (window.Capacitor
+      && typeof window.Capacitor.isNativePlatform === "function"
+      && window.Capacitor.isNativePlatform());
 }
 
 
@@ -10949,6 +11039,39 @@ function openSettingsModal(){
       </div>
     </div>
 
+    <div class="settings-section" data-block="sync">
+      <button type="button" class="settings-section-btn" data-section="sync">
+        <div>
+          <b>Sincronización</b>
+          <small id="syncStatusHead">${syncStatusLabel()}</small>
+        </div>
+        <span class="settings-caret">›</span>
+      </button>
+      <div class="settings-section-body">
+        <div class="settings-row" style="cursor:default">
+          <div>
+            <strong>Estado</strong>
+            <span id="syncStatusText">${syncStatusLabel()}</span>
+          </div>
+        </div>
+        <button type="button" class="settings-row" data-settings="cloud-sync" style="width:100%;text-align:left">
+          <div>
+            <strong>Sincronizar con la nube</strong>
+            <span>Apagado guarda solo en este dispositivo</span>
+          </div>
+          <div class="switch ${cloudSyncEnabled ? "on" : ""}">
+            <i></i>
+          </div>
+        </button>
+        <button type="button" class="settings-row" data-settings="sync-now" style="width:100%;text-align:left">
+          <div>
+            <strong>Sincronizar ahora</strong>
+            <span>Sube los cambios pendientes a la nube</span>
+          </div>
+        </button>
+      </div>
+    </div>
+
     <div class="settings-section" data-block="system">
       <button type="button" class="settings-section-btn" data-section="system">
         <div>
@@ -11013,6 +11136,22 @@ function openSettingsModal(){
     if(!row) return;
 
     const key = row.dataset.settings;
+
+    if(key==="cloud-sync"){
+      setCloudSyncEnabled(!cloudSyncEnabled).then(()=>{
+        const sw = row.querySelector(".switch");
+        if(sw) sw.classList.toggle("on", cloudSyncEnabled);
+      });
+      return;
+    }
+
+    if(key==="sync-now"){
+      syncNow().then(()=>{
+        const toggle = overlay.querySelector('[data-settings="cloud-sync"] .switch');
+        if(toggle) toggle.classList.toggle("on", cloudSyncEnabled);
+      });
+      return;
+    }
 
     if(key==="dark"){
       darkMode = !darkMode;
@@ -11637,6 +11776,7 @@ onAuthStateChanged(auth, async user=>{
   const ok = await ensureUserSpace(user);
   if(!ok) return;
 
+  applyCloudSyncPreference();
   startData();
   if(splashReady) renderAppOnly();
 
