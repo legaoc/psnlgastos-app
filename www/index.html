@@ -4856,7 +4856,8 @@ import {
   updateProfile,
   signOut,
   setPersistence,
-  browserLocalPersistence
+  browserLocalPersistence,
+  inMemoryPersistence
 }
 from "https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js";
 
@@ -4882,7 +4883,11 @@ let db;
 
 try{
 
-  db = initializeFirestore(firebaseApp, {
+  /* En la app nativa (WKWebView) el almacenamiento IndexedDB se queda
+     atorado y el login y los datos nunca llegan; en Safari sí funciona.
+     Por eso en la app se usa caché en memoria (sin persistencia local) y
+     en la web se mantiene el caché persistente. */
+  db = initializeFirestore(firebaseApp, isNativeApp() ? {} : {
     localCache: persistentLocalCache({
       tabManager: persistentMultipleTabManager()
     })
@@ -5362,7 +5367,10 @@ function scheduleFirstDataWatchdog(){
 }
 
 const auth = getAuth(firebaseApp);
-setPersistence(auth, browserLocalPersistence).catch(()=>{});
+/* En la app nativa la persistencia en IndexedDB se atora (mismo problema
+   que Firestore): la sesión vive solo mientras la app está abierta y hay
+   que volver a entrar si se cierra por completo. En la web sigue igual. */
+setPersistence(auth, isNativeApp() ? inMemoryPersistence : browserLocalPersistence).catch(()=>{});
 
 let currentUser = null;
 let authReady = false;
@@ -12359,7 +12367,9 @@ document.addEventListener("focusout", ()=>{
   setTimeout(liftAuthForKeyboard, 80);
 });
 
-if("serviceWorker" in navigator){
+/* En la app nativa no se registra el service worker: los archivos ya son
+   locales y el worker solo puede interferir con las peticiones del WebView. */
+if("serviceWorker" in navigator && !isNativeApp()){
   window.addEventListener("load", ()=>{
     navigator.serviceWorker.register("./sw.js").catch(()=>{});
   });
