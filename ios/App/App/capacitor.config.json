@@ -3,5 +3,10 @@
 	"appName": "CALCULA",
 	"webDir": "www",
 	"bundledWebRuntime": false,
-	"packageClassList": []
+	"packageClassList": [
+		"HapticsPlugin",
+		"LocalNotificationsPlugin",
+		"Biometrics",
+		"NativeMenu"
+	]
 }
