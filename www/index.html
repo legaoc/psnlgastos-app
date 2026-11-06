@@ -4619,6 +4619,44 @@ body.dark #ptr i{
     transition-duration:.01ms!important;
   }
 }
+
+/* =========================================================
+   VIDRIO NATIVO (Liquid Glass) — solo superficies flotantes
+   Barra superior, barra inferior (tabbar) y hojas/modales en
+   el tema oscuro. El resto de la app no cambia. En iOS el
+   desenfoque real lo compone el sistema; aquí solo se afina
+   la superficie (blur + saturación + borde claro + brillo).
+   No se aplica a tarjetas ni listas (rendimiento).
+========================================================= */
+
+body.dark .topbar{
+  background:rgba(20,20,26,.55);
+  -webkit-backdrop-filter:blur(20px) saturate(180%);
+  backdrop-filter:blur(20px) saturate(180%);
+  border:1px solid rgba(255,255,255,.09);
+  border-radius:20px;
+  box-shadow:
+    0 8px 28px rgba(0,0,0,.28),
+    inset 0 1px 0 rgba(255,255,255,.14);
+  padding-left:14px;
+  padding-right:14px;
+}
+
+body.dark .tabbar-pill{
+  -webkit-backdrop-filter:blur(28px) saturate(200%) brightness(1.06);
+  backdrop-filter:blur(28px) saturate(200%) brightness(1.06);
+  box-shadow:
+    0 14px 40px rgba(0,0,0,.45),
+    inset 0 1px 0 rgba(255,255,255,.16);
+}
+
+body.dark .modal{
+  -webkit-backdrop-filter:blur(32px) saturate(190%) brightness(1.05);
+  backdrop-filter:blur(32px) saturate(190%) brightness(1.05);
+  box-shadow:
+    0 20px 70px rgba(0,0,0,.45),
+    inset 0 1px 0 rgba(255,255,255,.14);
+}
 </style>
 </head>
 
@@ -4822,6 +4860,12 @@ import {
 }
 from "https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js";
 
+/* Señal de arranque para el watchdog (script clásico al final del body):
+   los imports de arriba se evalúan antes que esta línea; si el módulo
+   muere al importar Firebase del CDN, esta línea nunca corre y el
+   watchdog avisa en pantalla en vez de dejar el splash para siempre. */
+document.documentElement.classList.add("calcula-booted");
+document.getElementById("calcula-boot-error")?.remove();
 
 const firebaseConfig = {
   apiKey:"AIzaSyCcgcviBkZNFmi92xSdA7jb4iP44pbfhqo",
@@ -4933,6 +4977,388 @@ async function syncNow(){
   }
   syncNowWaiting = true;
   updateSyncStatusUI();
+}
+
+/* =========================================================
+   CAPA NATIVA (Capacitor) — menús de Apple, Face ID,
+   hápticos y avisos fuera de la app
+   Las pantallas siguen siendo web; esto es solo la capa
+   nativa alrededor. Todo lo de aquí solo actúa cuando
+   window.Capacitor.isNativePlatform() es true; en el
+   navegador/PWA el comportamiento no cambia.
+   NOTA: este bloque corre antes de que se declaren varias
+   variables del módulo (currentUser, initialized...); por
+   eso aquí solo se DEFINEN funciones y listeners. Nada de
+   lo que se ejecuta al cargar el módulo lee esas variables.
+========================================================= */
+
+function isNativeApp(){
+  return Boolean(
+    window.Capacitor
+    && typeof window.Capacitor.isNativePlatform === "function"
+    && window.Capacitor.isNativePlatform()
+  );
+}
+
+function withTimeout(promise, ms, mensaje){
+  let timer = null;
+  return Promise.race([
+    promise,
+    new Promise((_, reject)=>{
+      timer = setTimeout(()=>{
+        const error = new Error(mensaje || "Tiempo agotado");
+        error.code = "timeout";
+        reject(error);
+      }, ms);
+    })
+  ]).finally(()=>{ if(timer) clearTimeout(timer); });
+}
+
+/* --- Registro de plugins nativos --- */
+
+const NativeMenu = window.Capacitor?.registerPlugin
+  ? window.Capacitor.registerPlugin("NativeMenu", {
+      web: { showMenu: async ()=>({ selectedId: null }) }
+    })
+  : null;
+
+const NativeBiometrics = window.Capacitor?.registerPlugin
+  ? window.Capacitor.registerPlugin("Biometrics", {
+      web: { authenticate: async ()=>({ success: false }) }
+    })
+  : null;
+
+const NativeHaptics = window.Capacitor?.registerPlugin
+  ? window.Capacitor.registerPlugin("Haptics")
+  : null;
+
+const NativeLocalNotifications = window.Capacitor?.registerPlugin
+  ? window.Capacitor.registerPlugin("LocalNotifications")
+  : null;
+
+/* --- Hápticos --- */
+
+async function hapticLight(){
+  if(!isNativeApp() || !NativeHaptics) return;
+  try{
+    await NativeHaptics.impact({ style: "LIGHT" });
+  }catch(error){
+    // Los hápticos nunca deben romper el flujo
+  }
+}
+
+/* --- Menú nativo de Apple (mantener presionado) --- */
+
+async function showNativeMenu(title, x, y, items){
+  if(!isNativeApp() || !NativeMenu) return null;
+  try{
+    const result = await Promise.race([
+      NativeMenu.showMenu({ title, x, y, items }),
+      // Si el usuario descarta el menú sin elegir, Swift no resuelve;
+      // a los 30 s se trata como cancelado para no dejar la espera colgada.
+      new Promise(resolve=>setTimeout(()=>resolve({ selectedId: null }), 30000))
+    ]);
+    return result?.selectedId ?? null;
+  }catch(error){
+    console.error(error);
+    return null;
+  }
+}
+
+let lpTimer = null;
+let lpPoint = null;
+let lpTarget = null;
+let suppressNextClick = false;
+
+function longPressTarget(target){
+  if(!target || typeof target.closest !== "function") return null;
+  if(target.closest("button, input, select, textarea, a")) return null;
+  if(document.querySelector(".overlay")) return null;
+  if(document.body.classList.contains("search-open")) return null;
+  return target.closest(".account-card, .movement, .plan-card");
+}
+
+document.addEventListener("touchstart", event=>{
+  if(!isNativeApp()) return;
+  if(lpTimer) clearTimeout(lpTimer);
+  lpTimer = null;
+  lpTarget = null;
+  lpPoint = null;
+  const touch = event.touches[0];
+  if(!touch) return;
+  const card = longPressTarget(event.target);
+  if(!card) return;
+  lpTarget = card;
+  lpPoint = { x: touch.clientX, y: touch.clientY };
+  lpTimer = setTimeout(()=>{
+    lpTimer = null;
+    fireNativeMenuForCard(lpTarget, lpPoint);
+  }, 550);
+}, { passive: true });
+
+document.addEventListener("touchmove", event=>{
+  if(!lpTimer || !lpPoint) return;
+  const touch = event.touches[0];
+  if(!touch) return;
+  if(
+    Math.abs(touch.clientX - lpPoint.x) > 12
+    || Math.abs(touch.clientY - lpPoint.y) > 12
+  ){
+    clearTimeout(lpTimer);
+    lpTimer = null;
+    lpTarget = null;
+    lpPoint = null;
+  }
+}, { passive: true });
+
+["touchend", "touchcancel"].forEach(name=>{
+  document.addEventListener(name, ()=>{
+    if(lpTimer) clearTimeout(lpTimer);
+    lpTimer = null;
+    lpTarget = null;
+    lpPoint = null;
+  }, { passive: true });
+});
+
+// Evita que el menú de mantener presionado de Safari compita con el nativo
+document.addEventListener("contextmenu", event=>{
+  if(!isNativeApp()) return;
+  if(event.target.closest(".account-card, .movement, .plan-card")){
+    event.preventDefault();
+  }
+});
+
+// Tras abrir el menú, el tap que termina la pulsación no debe activar la tarjeta
+document.addEventListener("click", event=>{
+  if(!suppressNextClick) return;
+  suppressNextClick = false;
+  event.stopPropagation();
+  event.preventDefault();
+}, true);
+
+async function fireNativeMenuForCard(card, point){
+  if(!card || !point) return;
+  suppressNextClick = true;
+  setTimeout(()=>{ suppressNextClick = false; }, 1200);
+  hapticLight();
+
+  if(card.classList.contains("account-card")){
+    const id = card.dataset.id;
+    const account = getAccount(id);
+    if(!account) return;
+    const selected = await showNativeMenu(account.name || "Cuenta", point.x, point.y, [
+      { id: "view", title: "Ver movimientos", icon: "list.bullet" },
+      { id: "edit", title: "Editar datos", icon: "pencil" },
+      { id: "style", title: "Personalizar tarjeta", icon: "paintpalette" },
+      { id: "delete", title: "Eliminar cuenta", icon: "trash", destructive: true }
+    ]);
+    if(selected === "view") openAccountScreen(id);
+    else if(selected === "edit") openEditAccountModal(id);
+    else if(selected === "style") openAccountStyleModal(id);
+    else if(selected === "delete") openDeleteAccountModal(id);
+    return;
+  }
+
+  if(card.classList.contains("movement")){
+    const btn = card.querySelector("[data-action='delete-movement']");
+    const id = btn?.dataset.id;
+    const movement =
+      movements.find(m=>m.id===id)
+      || allMovements.find(m=>m.id===id);
+    if(!movement) return;
+    const selected = await showNativeMenu(movement.note || "Movimiento", point.x, point.y, [
+      { id: "view", title: "Ver cuenta", icon: "eye" },
+      { id: "delete", title: "Eliminar movimiento", icon: "trash", destructive: true }
+    ]);
+    if(selected === "view") openAccountScreen(movement.accountId);
+    else if(selected === "delete") openDeleteMovementModal(id);
+    return;
+  }
+
+  if(card.classList.contains("plan-card")){
+    const id = card.dataset.id;
+    const goal = goals.find(g=>g.id===id);
+    if(!goal) return;
+    const selected = await showNativeMenu(goal.name || "Meta", point.x, point.y, [
+      { id: "edit", title: "Editar", icon: "pencil" },
+      { id: "add", title: "Apartar", icon: "plus.circle" },
+      { id: "share", title: "Compartir tarjeta", icon: "square.and.arrow.up" },
+      { id: "delete", title: "Eliminar meta", icon: "trash", destructive: true }
+    ]);
+    if(selected === "edit") openGoalModal(id);
+    else if(selected === "add") openGoalAddModal(id);
+    else if(selected === "share") shareGoalCard(id);
+    else if(selected === "delete") deleteGoalFromMenu(id);
+    return;
+  }
+}
+
+async function deleteGoalFromMenu(goalId){
+  const goal = goals.find(g=>g.id===goalId);
+  if(!goal) return;
+  const yes = await askConfirm("¿Eliminar esta meta?", "Eliminar", "Cancelar");
+  if(!yes) return;
+  try{
+    await deleteDoc(userDoc("goals", goal.id));
+    showToast("Meta eliminada");
+  }catch(error){
+    showToast("No se pudo eliminar");
+  }
+}
+
+/* --- Face ID (bloqueo de la app) --- */
+
+const FACEID_KEY = "calcula-faceid-lock";
+let nativeLocked = false;
+let nativeLockAttempted = false;
+let nativeUnlockedThisSession = false;
+
+function faceIdLockEnabled(){
+  return localStorage.getItem(FACEID_KEY) === "1";
+}
+
+function setFaceIdLockEnabled(enabled){
+  localStorage.setItem(FACEID_KEY, enabled ? "1" : "0");
+}
+
+async function attemptNativeUnlock(){
+  if(!isNativeApp() || !NativeBiometrics) return false;
+  try{
+    const result = await NativeBiometrics.authenticate({ reason: "Desbloquea Calcula" });
+    if(result?.success){
+      nativeLocked = false;
+      nativeUnlockedThisSession = true;
+      renderAppOnly();
+      return true;
+    }
+  }catch(error){
+    console.error(error);
+  }
+  return false;
+}
+
+function renderNativeLockScreen(){
+  root.innerHTML = `
+    <main class="app login-screen">
+      <div class="login-card">
+        <h1>Calcula</h1>
+        <p style="text-align:center;color:#8b8b91;font-size:14px;line-height:1.5;margin:8px 0 20px">
+          Tu app está bloqueada.<br>Usa Face ID para desbloquearla.
+        </p>
+        <button type="button" class="btn-primary" id="nativeUnlockBtn" style="width:100%">
+          Desbloquear
+        </button>
+      </div>
+    </main>
+  `;
+  document.getElementById("nativeUnlockBtn")?.addEventListener("click", async ()=>{
+    const ok = await attemptNativeUnlock();
+    if(!ok) showToast("No se pudo desbloquear");
+  });
+  if(!nativeLockAttempted){
+    nativeLockAttempted = true;
+    attemptNativeUnlock();
+  }
+}
+
+/* --- Avisos fuera de la app (notificaciones locales) --- */
+
+const NATIVE_REMINDERS_KEY = "calcula-reminders";
+let nativeRemindersScheduling = false;
+let nativeRemindersStamp = "";
+
+function nativeRemindersEnabled(){
+  return localStorage.getItem(NATIVE_REMINDERS_KEY) === "1";
+}
+
+function setNativeRemindersEnabled(enabled){
+  localStorage.setItem(NATIVE_REMINDERS_KEY, enabled ? "1" : "0");
+}
+
+function hashNotificationId(text){
+  let hash = 5381;
+  for(let i = 0; i < text.length; i++){
+    hash = ((hash << 5) + hash + text.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash) + 1;
+}
+
+async function cancelNativeReminders(){
+  if(!isNativeApp() || !NativeLocalNotifications) return;
+  try{
+    const pending = await NativeLocalNotifications.getPending();
+    const list = (pending?.notifications || []).map(n=>({ id: n.id }));
+    if(list.length){
+      await NativeLocalNotifications.cancel({ notifications: list });
+    }
+  }catch(error){
+    console.error(error);
+  }
+}
+
+async function scheduleNativeReminders(force){
+  if(!isNativeApp() || !NativeLocalNotifications) return;
+  if(!nativeRemindersEnabled()) return;
+  if(nativeRemindersScheduling) return;
+  // Los avisos nativos usan los mismos próximos pagos que el banner de la
+  // app, aunque el aviso dentro de la app esté apagado: se lee la lista
+  // sin el filtro del interruptor de recordatorios en la app.
+  const prevEnabled = reminderSettings.enabled;
+  reminderSettings.enabled = true;
+  const items = upcomingReminderItems();
+  reminderSettings.enabled = prevEnabled;
+  const stamp = items.map(item=>item.id + ":" + item.days).join("|");
+  if(!force && stamp === nativeRemindersStamp) return;
+  nativeRemindersStamp = stamp;
+  nativeRemindersScheduling = true;
+  try{
+    // Cancelar todo lo pendiente antes de programar evita duplicados y
+    // avisos de pagos que ya se pagaron (la app no programa nada más).
+    await cancelNativeReminders();
+    const now = Date.now();
+    const notifications = items.map(item=>{
+      const due = dateValue(item.due) || new Date();
+      const at = new Date(due.getFullYear(), due.getMonth(), due.getDate(), 9, 0, 0);
+      return {
+        id: hashNotificationId("calcula-" + item.id),
+        title: item.name || "Pago",
+        body: reminderWhen(item.days)
+          + (item.amount ? " · " + money(item.amount) : ""),
+        schedule: { at }
+      };
+    }).filter(n=>n.schedule.at.getTime() > now);
+    if(notifications.length){
+      await NativeLocalNotifications.schedule({ notifications });
+    }
+  }catch(error){
+    console.error(error);
+  }finally{
+    nativeRemindersScheduling = false;
+  }
+}
+
+/* --- Watchdog de primeros datos (login) ---
+   Si Firestore no responde, el primer onSnapshot de cuentas nunca llega
+   y la app se quedaría en el skeleton para siempre. A los 20 s se pinta
+   la app con lo que haya en local (vacío si no hay nada guardado) y el
+   flujo normal vuelve a pintar cuando llegue el primer snapshot. */
+
+let firstDataWatchdogTimer = null;
+let firstDataWatchdogDone = false;
+
+function scheduleFirstDataWatchdog(){
+  if(firstDataWatchdogDone) return;
+  firstDataWatchdogDone = true;
+  if(firstDataWatchdogTimer) clearTimeout(firstDataWatchdogTimer);
+  firstDataWatchdogTimer = setTimeout(()=>{
+    firstDataWatchdogTimer = null;
+    if(initialized) return;
+    if(!currentUser || !dataStarted) return;
+    initialized = true;
+    renderAppOnly();
+    dismissSplash();
+    showToast("Sin conexión con la nube, mostrando los datos guardados en el teléfono");
+  }, 20000);
 }
 
 const auth = getAuth(firebaseApp);
@@ -6120,6 +6546,7 @@ function openGoalModal(goalId){
         showToast("Meta creada");
       }
       closeModal();
+      hapticLight();
     }
     catch(error){
       showToast("No se pudo guardar");
@@ -6426,6 +6853,7 @@ function openGoalAddModal(goalId){
         saved: Number(goal.saved||0) + amount
       });
       closeModal();
+      hapticLight();
       showToast("Apartado");
     }
     catch(error){
@@ -9516,6 +9944,7 @@ async function maybeNotifyReminders(){
     .join(" · ");
 
   showToast(body, "Pagos por venir");
+  scheduleNativeReminders();
 
 }
 
@@ -10079,6 +10508,11 @@ function renderAppOnly(){
   if(!splashReady) return;
   if(!initialized){
     renderSkeleton();
+    return;
+  }
+
+  if(nativeLocked){
+    renderNativeLockScreen();
     return;
   }
 
@@ -11012,6 +11446,15 @@ function openSettingsModal(){
             <span>iPhone avisa aunque esté cerrada</span>
           </div>
         </button>
+        <button type="button" class="settings-row" data-settings="remind-native" style="width:100%;text-align:left">
+          <div>
+            <strong>Avisos fuera de la app</strong>
+            <span>Notificación del iPhone el día del pago</span>
+          </div>
+          <div class="switch ${nativeRemindersEnabled() ? "on" : ""}">
+            <i></i>
+          </div>
+        </button>
       </div>
     </div>
 
@@ -11067,6 +11510,27 @@ function openSettingsModal(){
           <div>
             <strong>Sincronizar ahora</strong>
             <span>Sube los cambios pendientes a la nube</span>
+          </div>
+        </button>
+      </div>
+    </div>
+
+    <div class="settings-section" data-block="security">
+      <button type="button" class="settings-section-btn" data-section="security">
+        <div>
+          <b>Seguridad</b>
+          <small>${faceIdLockEnabled() ? "Bloqueo con Face ID" : "Sin bloqueo"}</small>
+        </div>
+        <span class="settings-caret">›</span>
+      </button>
+      <div class="settings-section-body">
+        <button type="button" class="settings-row" data-settings="faceid" style="width:100%;text-align:left">
+          <div>
+            <strong>Bloquear con Face ID</strong>
+            <span>Pide Face ID al abrir la app</span>
+          </div>
+          <div class="switch ${faceIdLockEnabled() ? "on" : ""}">
+            <i></i>
           </div>
         </button>
       </div>
@@ -11150,6 +11614,59 @@ function openSettingsModal(){
         const toggle = overlay.querySelector('[data-settings="cloud-sync"] .switch');
         if(toggle) toggle.classList.toggle("on", cloudSyncEnabled);
       });
+      return;
+    }
+
+    if(key==="faceid"){
+      if(!isNativeApp()){
+        showToast("Face ID solo está disponible en la app de iPhone");
+        return;
+      }
+      const next = !faceIdLockEnabled();
+      if(next){
+        // Confirmar que el dispositivo puede desbloquear antes de activarlo
+        attemptNativeUnlock().then(ok=>{
+          if(ok){
+            setFaceIdLockEnabled(true);
+            const sw = row.querySelector(".switch");
+            if(sw) sw.classList.toggle("on", true);
+            showToast("Bloqueo con Face ID activado");
+          }else{
+            showToast("No se pudo activar Face ID");
+          }
+        });
+      }else{
+        setFaceIdLockEnabled(false);
+        const sw = row.querySelector(".switch");
+        if(sw) sw.classList.toggle("on", false);
+      }
+      return;
+    }
+
+    if(key==="remind-native"){
+      if(!isNativeApp()){
+        showToast("Los avisos fuera de la app solo están en la app de iPhone");
+        return;
+      }
+      const next = !nativeRemindersEnabled();
+      if(next){
+        NativeLocalNotifications.requestPermissions().then(result=>{
+          if(result?.display === "granted"){
+            setNativeRemindersEnabled(true);
+            const sw = row.querySelector(".switch");
+            if(sw) sw.classList.toggle("on", true);
+            scheduleNativeReminders(true);
+            showToast("Avisos activados");
+          }else{
+            showToast("Activa los avisos en Ajustes del iPhone");
+          }
+        }).catch(()=>showToast("No se pudo pedir permiso"));
+      }else{
+        setNativeRemindersEnabled(false);
+        cancelNativeReminders();
+        const sw = row.querySelector(".switch");
+        if(sw) sw.classList.toggle("on", false);
+      }
       return;
     }
 
@@ -11429,6 +11946,17 @@ function stopData(){
   profileLoaded=false;
   greetingPhase = "pending";
 
+  // Limpieza nativa: al cerrar sesión se retira el bloqueo y el watchdog
+  // de primeros datos para que el próximo inicio los arme de nuevo.
+  nativeLocked = false;
+  nativeLockAttempted = false;
+  nativeUnlockedThisSession = false;
+  firstDataWatchdogDone = false;
+  if(firstDataWatchdogTimer){
+    clearTimeout(firstDataWatchdogTimer);
+    firstDataWatchdogTimer = null;
+  }
+
 }
 
 
@@ -11498,11 +12026,19 @@ function renderLogin(){
     }
     showLoading();
     try{
-      await signInWithEmailAndPassword(auth,email,password);
+      await withTimeout(
+        signInWithEmailAndPassword(auth,email,password),
+        20000,
+        "El inicio de sesión agotó el tiempo"
+      );
     }
     catch(error){
       console.error(error);
-      showToast(authErrorMessage(error));
+      showToast(
+        error?.code === "timeout"
+          ? "No se pudo conectar con Firebase, revisa tu internet e inténtalo de nuevo"
+          : authErrorMessage(error)
+      );
     }
     finally{
       hideLoading();
@@ -11773,11 +12309,27 @@ onAuthStateChanged(auth, async user=>{
     return;
   }
 
-  const ok = await ensureUserSpace(user);
-  if(!ok) return;
+  let ok = false;
+  try{
+    ok = await withTimeout(ensureUserSpace(user), 15000, "ensureUserSpace agotó el tiempo");
+  }catch(error){
+    console.error(error);
+    ok = false;
+  }
+  if(!ok){
+    // Sin preparar la cuenta (o sin tiempo): no bloquear el arranque.
+    // Se entra con los datos locales y la migración del documento ready
+    // se reintentará en el próximo inicio.
+    showToast("No se pudo preparar tu cuenta, entrarás con tus datos locales");
+  }
 
   applyCloudSyncPreference();
   startData();
+  scheduleFirstDataWatchdog();
+  if(isNativeApp() && faceIdLockEnabled() && !nativeUnlockedThisSession){
+    nativeLocked = true;
+    nativeLockAttempted = false;
+  }
   if(splashReady) renderAppOnly();
 
 });
@@ -16500,6 +17052,7 @@ function openMovementModal(
           });
 
           closeModal();
+          hapticLight();
 
           syncToast(
             isCargo
@@ -18898,6 +19451,27 @@ window.addEventListener(
   }
 );
 
+</script>
+
+<script>
+/* Watchdog de arranque: si el module script murió al importar Firebase
+   del CDN, la clase calcula-booted nunca se pone y la app se quedaría en
+   el splash para siempre sin decir nada. A los 12 s se muestra el error
+   en pantalla y se oculta el splash. No depende del module script ni de
+   Firebase; si el módulo arranca tarde, al ponerse la clase se retira
+   el mensaje (ver la primera línea del module script). */
+setTimeout(function(){
+  if(document.documentElement.classList.contains("calcula-booted")) return;
+  var splash = document.getElementById("splash");
+  if(splash) splash.style.display = "none";
+  if(document.getElementById("calcula-boot-error")) return;
+  var box = document.createElement("div");
+  box.id = "calcula-boot-error";
+  box.setAttribute("role", "alert");
+  box.style.cssText = "position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;padding:24px;background:#101014;color:#f5f5f7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;text-align:center;";
+  box.innerHTML = "<div style='max-width:340px'><div style='font-size:20px;font-weight:700;margin-bottom:10px'>No se pudo cargar Calcula.</div><div style='font-size:15px;line-height:1.5;opacity:.85'>Revisa tu conexión a internet y recarga la página.</div></div>";
+  document.body.appendChild(box);
+}, 12000);
 </script>
 
 </body>
