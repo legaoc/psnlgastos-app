@@ -1,0 +1,7 @@
+{
+	"appId": "com.legaoc.psnlgastos",
+	"appName": "CALCULA",
+	"webDir": "www",
+	"bundledWebRuntime": false,
+	"packageClassList": []
+}
