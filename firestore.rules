@@ -1,0 +1,47 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/meta/config)
+        && request.auth.uid == get(/databases/$(database)/documents/meta/config).data.ownerUid;
+    }
+
+    match /users/{userId}/{document=**} {
+      allow read, write: if signedIn() && request.auth.uid == userId;
+    }
+
+    match /meta/config {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+
+    match /accounts/{id} {
+      allow read, write: if isOwner();
+    }
+    match /movements/{id} {
+      allow read, write: if isOwner();
+    }
+    match /scheduledPayments/{id} {
+      allow read, write: if isOwner();
+    }
+    match /settings/{id} {
+      allow read, write: if isOwner();
+    }
+    match /budgets/{id} {
+      allow read, write: if isOwner();
+    }
+    match /goals/{id} {
+      allow read, write: if isOwner();
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

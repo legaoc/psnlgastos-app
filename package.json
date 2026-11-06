@@ -1,0 +1,13 @@
+{
+  "name": "psnlgastos-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Calcula (clon iOS con Capacitor de legaoc/psnlgastos)",
+  "dependencies": {
+    "@capacitor/core": "^7.4.0",
+    "@capacitor/ios": "^7.4.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^7.4.0"
+  }
+}
